@@ -5,10 +5,10 @@ import { gameColors, commonStyles } from "@/styles/commonStyles";
 import * as Haptics from "expo-haptics";
 import { Stack } from "expo-router";
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 type GameState = 'idle' | 'playing' | 'choosing' | 'challenge' | 'gameOver';
-type ChallengeType = 'precision' | 'timing' | 'swipe';
+type ChallengeType = 'precision' | 'timing';
 
 export default function HomeScreen() {
   const [gameState, setGameState] = useState<GameState>('idle');
@@ -25,10 +25,20 @@ export default function HomeScreen() {
   // Challenge state
   const [challengeStartTime, setChallengeStartTime] = useState(0);
   const [targetPosition, setTargetPosition] = useState({ x: 0, y: 0 });
+  const challengeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     console.log('Game state changed:', gameState, 'Score:', score);
   }, [gameState, score]);
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (challengeTimeoutRef.current) {
+        clearTimeout(challengeTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const startGame = () => {
     console.log('User tapped Start Game');
@@ -68,9 +78,11 @@ export default function HomeScreen() {
     console.log('User chose DOUBLE - Starting challenge at difficulty:', difficulty);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     
-    // Randomly select challenge type
-    const challenges: ChallengeType[] = ['precision', 'timing', 'swipe'];
+    // Only use precision and timing challenges (swipe removed for now)
+    const challenges: ChallengeType[] = ['precision', 'timing'];
     const randomChallenge = challenges[Math.floor(Math.random() * challenges.length)];
+    
+    console.log('Selected challenge type:', randomChallenge);
     
     setCurrentChallenge(randomChallenge);
     setGameState('challenge');
@@ -86,74 +98,124 @@ export default function HomeScreen() {
 
   const startPrecisionChallenge = () => {
     console.log('Starting precision challenge');
+    
+    // Clear any existing timeout
+    if (challengeTimeoutRef.current) {
+      clearTimeout(challengeTimeoutRef.current);
+    }
+    
     // Shrinking target based on difficulty
-    const initialSize = Math.max(200 - (difficulty * 15), 80);
-    const finalSize = Math.max(100 - (difficulty * 10), 40);
+    const initialSize = Math.max(200 - (difficulty * 15), 100);
+    const finalSize = Math.max(120 - (difficulty * 10), 60);
+    const duration = Math.max(2000 - (difficulty * 100), 1000);
     
     targetSize.setValue(initialSize);
     
-    // Random position for target
-    const padding = 100;
+    // Random position for target - ensure it's visible on screen
+    const padding = 50;
+    const maxX = SCREEN_WIDTH - initialSize - padding;
+    const maxY = SCREEN_HEIGHT - initialSize - padding - 200; // Account for bottom UI
+    
     setTargetPosition({
-      x: Math.random() * (SCREEN_WIDTH - padding * 2) + padding,
-      y: Math.random() * 300 + 200,
+      x: Math.random() * maxX + padding,
+      y: Math.random() * (maxY - 200) + 200, // Keep it in middle area
     });
+    
+    console.log('Target position:', { x: targetPosition.x, y: targetPosition.y, initialSize, finalSize, duration });
     
     Animated.timing(targetSize, {
       toValue: finalSize,
-      duration: Math.max(1000 - (difficulty * 50), 500),
+      duration: duration,
       useNativeDriver: false,
     }).start();
+    
+    // Auto-fail after duration + 500ms if not tapped
+    challengeTimeoutRef.current = setTimeout(() => {
+      console.log('Precision challenge timed out');
+      handleChallengeFail();
+    }, duration + 500);
   };
 
   const startTimingChallenge = () => {
     console.log('Starting timing challenge');
+    
+    // Clear any existing timeout
+    if (challengeTimeoutRef.current) {
+      clearTimeout(challengeTimeoutRef.current);
+    }
+    
     challengeProgress.setValue(0);
     
-    const duration = Math.max(1500 - (difficulty * 50), 800);
+    const duration = Math.max(2000 - (difficulty * 100), 1000);
+    
+    console.log('Timing challenge duration:', duration);
     
     Animated.timing(challengeProgress, {
       toValue: 1,
       duration: duration,
       useNativeDriver: false,
     }).start();
+    
+    // Auto-fail after duration + 200ms if not tapped
+    challengeTimeoutRef.current = setTimeout(() => {
+      console.log('Timing challenge timed out');
+      handleChallengeFail();
+    }, duration + 200);
   };
 
   const handleChallengeAttempt = () => {
+    // Clear timeout since user attempted
+    if (challengeTimeoutRef.current) {
+      clearTimeout(challengeTimeoutRef.current);
+      challengeTimeoutRef.current = null;
+    }
+    
     const elapsed = Date.now() - challengeStartTime;
     console.log('Challenge attempt - Type:', currentChallenge, 'Elapsed:', elapsed);
     
     let success = false;
     
     if (currentChallenge === 'precision') {
-      // Success if tapped within time limit
-      success = elapsed < Math.max(1000 - (difficulty * 50), 500);
+      // Success if tapped (since they tapped the target)
+      const maxDuration = Math.max(2000 - (difficulty * 100), 1000);
+      success = elapsed < maxDuration + 500;
+      console.log('Precision check - elapsed:', elapsed, 'maxDuration:', maxDuration, 'success:', success);
     } else if (currentChallenge === 'timing') {
-      // Success if tapped in the "sweet spot" (40-60% of progress)
+      // Success if tapped in the "sweet spot" (35-65% of progress)
       const progress = challengeProgress._value;
-      success = progress >= 0.4 && progress <= 0.6;
+      success = progress >= 0.35 && progress <= 0.65;
+      console.log('Timing check - progress:', progress, 'success:', success);
     }
     
     if (success) {
-      console.log('Challenge SUCCESS - Doubling score from', score, 'to', score * 2);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setScore(score * 2);
-      setDifficulty(difficulty + 1);
-      setGameState('choosing');
-      animateScore();
+      handleChallengeSuccess();
     } else {
-      console.log('Challenge FAILED - Game over');
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      
-      if (score > bestScore) {
-        setBestScore(score);
-      }
-      
-      setScore(0);
-      setGameState('gameOver');
+      handleChallengeFail();
+    }
+  };
+
+  const handleChallengeSuccess = () => {
+    const newScore = score * 2;
+    console.log('Challenge SUCCESS - Doubling score from', score, 'to', newScore);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setScore(newScore);
+    setDifficulty(difficulty + 1);
+    setCurrentChallenge(null);
+    setGameState('choosing');
+    animateScore();
+  };
+
+  const handleChallengeFail = () => {
+    console.log('Challenge FAILED - Game over');
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    
+    if (score > bestScore) {
+      setBestScore(score);
     }
     
     setCurrentChallenge(null);
+    setScore(0);
+    setGameState('gameOver');
   };
 
   const renderIdleScreen = () => {
@@ -214,16 +276,16 @@ export default function HomeScreen() {
           {questionText}
         </Text>
         
-        <View style={{ gap: 20 }}>
+        <View style={{ gap: 20, width: '80%' }}>
           <TouchableOpacity
-            style={[commonStyles.button, { backgroundColor: gameColors.secondary }]}
+            style={[commonStyles.button, { backgroundColor: gameColors.secondary, width: '100%' }]}
             onPress={handleStop}
           >
             <Text style={commonStyles.buttonText}>STOP</Text>
           </TouchableOpacity>
           
           <TouchableOpacity
-            style={[commonStyles.button, { backgroundColor: gameColors.primary }]}
+            style={[commonStyles.button, { backgroundColor: gameColors.primary, width: '100%' }]}
             onPress={handleDouble}
           >
             <Text style={commonStyles.buttonText}>DOUBLE</Text>
@@ -239,7 +301,7 @@ export default function HomeScreen() {
       
       return (
         <View style={commonStyles.centerContent}>
-          <Text style={[commonStyles.subtitle, { marginBottom: 48 }]}>
+          <Text style={[commonStyles.subtitle, { position: 'absolute', top: 100, fontSize: 24, fontWeight: 'bold', color: gameColors.text }]}>
             {instructionText}
           </Text>
           
@@ -254,23 +316,14 @@ export default function HomeScreen() {
               backgroundColor: gameColors.challengeActive,
               justifyContent: 'center',
               alignItems: 'center',
-              transform: [
-                { translateX: targetSize.interpolate({
-                  inputRange: [0, 200],
-                  outputRange: [0, -100],
-                }) },
-                { translateY: targetSize.interpolate({
-                  inputRange: [0, 200],
-                  outputRange: [0, -100],
-                }) },
-              ],
             }}
           >
             <TouchableOpacity
-              style={{ width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}
+              style={{ width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center', borderRadius: 1000 }}
               onPress={handleChallengeAttempt}
+              activeOpacity={0.7}
             >
-              <Text style={[commonStyles.buttonText, { fontSize: 32 }]}>TAP</Text>
+              <Text style={[commonStyles.buttonText, { fontSize: 24 }]}>TAP</Text>
             </TouchableOpacity>
           </Animated.View>
         </View>
@@ -286,10 +339,11 @@ export default function HomeScreen() {
       });
       
       const barColor = challengeProgress.interpolate({
-        inputRange: [0, 0.4, 0.5, 0.6, 1],
+        inputRange: [0, 0.35, 0.4, 0.6, 0.65, 1],
         outputRange: [
           gameColors.challengeActive,
           gameColors.challengeActive,
+          gameColors.challengeSuccess,
           gameColors.challengeSuccess,
           gameColors.challengeActive,
           gameColors.challengeActive,
@@ -298,17 +352,19 @@ export default function HomeScreen() {
       
       return (
         <View style={commonStyles.centerContent}>
-          <Text style={[commonStyles.subtitle, { marginBottom: 48 }]}>
+          <Text style={[commonStyles.subtitle, { marginBottom: 48, fontSize: 24, fontWeight: 'bold', color: gameColors.text }]}>
             {instructionText}
           </Text>
           
           <View style={{
             width: SCREEN_WIDTH - 80,
-            height: 60,
+            height: 80,
             backgroundColor: gameColors.card,
-            borderRadius: 30,
+            borderRadius: 40,
             overflow: 'hidden',
             marginBottom: 48,
+            borderWidth: 3,
+            borderColor: gameColors.textSecondary,
           }}>
             <Animated.View
               style={{
@@ -322,6 +378,7 @@ export default function HomeScreen() {
           <TouchableOpacity
             style={[commonStyles.button, { backgroundColor: gameColors.primary, width: SCREEN_WIDTH - 80 }]}
             onPress={handleChallengeAttempt}
+            activeOpacity={0.7}
           >
             <Text style={commonStyles.buttonText}>TAP NOW!</Text>
           </TouchableOpacity>
